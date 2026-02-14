@@ -4,36 +4,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a **Claude Code Skill** called "podcast-clipper" that automates the "Raw-to-Ready" pipeline for SMEC AI's "The ROI from AI" podcast. It transforms raw podcast recordings into branded social media clips with subtitles, logo overlays, and platform-optimized captions.
+A **Claude Code Skill** called "podcast-clipper" that automates the "Raw-to-Ready" pipeline for SMEC AI's "The ROI from AI" podcast. Transforms raw podcast recordings into branded social media clips with subtitles, logo overlays, and platform-optimized captions.
 
-The skill lives in `.claude/skills/podcast-clipper/` and is invoked via Claude Code with commands like:
-```
-Use podcast-clipper on meeting_01.mp4
+The source video (`podcast_combined.mp4`) is 1280x360 — two 640x360 participant feeds side-by-side. All rendering logic accounts for this layout.
+
+## Running
+
+```bash
+# Full pipeline
+python3 .claude/skills/podcast-clipper/scripts/pipeline.py <input_video> <output_dir> [--logo <logo.png>]
+
+# E2E test (3 segments × 3 formats, with automated visual quality checks)
+CUDA_VISIBLE_DEVICES="" python3 test_pipeline.py
+
+# Individual pipeline steps
+python3 .claude/skills/podcast-clipper/scripts/transcribe.py <input_video> <output_dir>
+python3 .claude/skills/podcast-clipper/scripts/select_clips.py <output_dir>/transcript.json <output_dir>
+python3 .claude/skills/podcast-clipper/scripts/process_video.py <input_video> <output_dir> [--logo <logo.png>]
+python3 .claude/skills/podcast-clipper/scripts/generate_copy.py <output_dir>
 ```
 
 ## Architecture
 
-The pipeline is a 5-step sequential process orchestrated by `pipeline.py`:
+Five-step sequential pipeline orchestrated by `pipeline.py`:
 
-1. **Transcribe** (`transcribe.py`) — Two-pass Whisper strategy: `tiny` model for fast full transcript, `small` model for accurate per-clip subtitles later. Uses ffmpeg two-pass loudnorm for audio normalization before transcription.
+1. **Transcribe** (`transcribe.py`) — Two-pass Whisper: `tiny` for fast full transcript, `small` for accurate per-clip subtitles. Uses ffmpeg two-pass loudnorm. Audio path preserved via `_audio_path.txt` for pass-2 re-transcription.
 
-2. **Select Clips** (`select_clips.py`) — Sends transcript to Claude (Sonnet) to identify 3-5 high-value 30-60s clips. Snaps clip boundaries to word-level timestamps with 0.5s padding.
+2. **Select Clips** (`select_clips.py`) — Claude Sonnet (`claude-sonnet-4-5-20250929`) identifies 3-5 clips (30-60s). Snaps boundaries to word timestamps with 0.5s padding. Falls back to full-length clip on parse failure.
 
-3. **Process Video** (`process_video.py`) — For each clip: slices raw video, renders three formats (horizontal 1920x1080, square 1080x1080, vertical 1080x1920 with blurred background), generates ASS subtitles, burns them in, overlays SMEC logo. Vertical format uses blurred-background technique to solve the aspect ratio problem.
+3. **Process Video** (`process_video.py`) — The most complex step. For each clip:
+   - Detects side-by-side layout (width:height > 3:1)
+   - Renders 3 formats with SBS-aware logic:
+     - **Horizontal** (1920×1080): scales strip to full width, dark `#111111` bg
+     - **Square** (1080×1080): splits participants, stacks vertically with 8px divider
+     - **Vertical** (1080×1920): stacks participants in upper 2/3, dark lower third for subtitles
+   - Generates ASS subtitles (word-chunked, format-specific margins, `BorderStyle=3` semi-transparent box)
+   - Burns subtitles via ffmpeg `ass` filter
+   - Overlays logo top-right of video content, auto-recolors to white on dark backgrounds using `colorlevels`
 
-4. **Generate Captions** (`generate_copy.py`) — Uses Claude (Sonnet) to produce platform-specific copy (LinkedIn, YouTube, Instagram, TikTok) for each clip.
+4. **Generate Captions** (`generate_copy.py`) — Claude Sonnet produces LinkedIn, YouTube, Instagram, TikTok copy per clip.
 
-5. **Summary** — Generates `summary.md` with clip details and LinkedIn caption previews.
-
-### Key Files
-
-- `.claude/skills/podcast-clipper/SKILL.md` — Skill definition and Claude Code instructions
-- `.claude/skills/podcast-clipper/scripts/pipeline.py` — Main orchestrator
-- `.claude/skills/podcast-clipper/scripts/transcribe.py` — Whisper transcription with loudnorm
-- `.claude/skills/podcast-clipper/scripts/select_clips.py` — Claude-powered clip selection
-- `.claude/skills/podcast-clipper/scripts/process_video.py` — Multi-format video rendering with ffmpeg
-- `.claude/skills/podcast-clipper/scripts/generate_copy.py` — Claude-powered caption generation
-- `.claude/skills/podcast-clipper/assets/smec_logo.png` — Brand logo for overlay
+5. **Summary** — Generates `summary.md` with clip details and LinkedIn previews.
 
 ### Data Flow
 
@@ -41,32 +52,36 @@ The pipeline is a 5-step sequential process orchestrated by `pipeline.py`:
 input.mp4 → transcript.json → clips.json → clip_NN_<slug>/{horizontal,square,vertical}.mp4 + captions.json → summary.md
 ```
 
-Intermediate audio is preserved at a temp path (referenced via `_audio_path.txt`) for pass-2 re-transcription.
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `.claude/skills/podcast-clipper/scripts/process_video.py` | Video rendering, SBS detection, subtitles, logo overlay (~700 lines) |
+| `.claude/skills/podcast-clipper/scripts/pipeline.py` | Orchestrator |
+| `test_pipeline.py` | E2E test suite with PIL/numpy visual quality validation |
+| `.claude/skills/podcast-clipper/assets/smec_logo.png` | SMEC AI logo (1483×344, purple on transparent) |
+
+## E2E Test Suite
+
+`test_pipeline.py` extracts 3 diverse 30s segments (intro/mid/deep), runs the full pipeline, then validates:
+
+- **Subtitle placement**: geometric zone check ensures subs don't overlap participant faces
+- **Subtitle contrast**: luminance ratio between text (>200) and background (<100), minimum 3.0×
+- **Logo detection**: color-channel analysis (blue > 40, blue > green×1.5) for the purple SMEC logo
+- **Logo size**: minimum 190px rendered width
+- **File integrity**: resolution, codec, bitrate, file size checks
+
+Output: `test_e2e_output/test_report.md` with per-format pass/fail table and extracted analysis frames.
 
 ## Dependencies
 
-- **Python 3**: `openai-whisper`, `anthropic`, `numpy`
-- **System**: `ffmpeg`, `ffprobe`
-- **Fonts**: FreeSans Bold at `/usr/share/fonts/truetype/freefont/FreeSansBold.ttf`
-- **Environment**: `ANTHROPIC_API_KEY` must be set (used by `select_clips.py` and `generate_copy.py`)
+- **Python**: `openai-whisper`, `anthropic`, `numpy`, `Pillow`
+- **System**: `ffmpeg`, `ffprobe`, FreeSans Bold font
+- **Environment**: `ANTHROPIC_API_KEY` in `.env`, `CUDA_VISIBLE_DEVICES=""` to avoid Triton bug
 
-## Running
+## FFmpeg Patterns
 
-### Full pipeline
-```bash
-python3 ~/.claude/skills/podcast-clipper/scripts/pipeline.py <input_video> <output_dir> [--logo <logo.png>]
-```
-
-### Individual steps
-```bash
-python3 ~/.claude/skills/podcast-clipper/scripts/transcribe.py <input_video> <output_dir> [--model MODEL]
-python3 ~/.claude/skills/podcast-clipper/scripts/select_clips.py <output_dir>/transcript.json <output_dir>
-python3 ~/.claude/skills/podcast-clipper/scripts/process_video.py <input_video> <output_dir> [--logo <logo.png>]
-python3 ~/.claude/skills/podcast-clipper/scripts/generate_copy.py <output_dir>
-```
-
-## Known Issues
-
-- Whisper may have CUDA/Triton compatibility issues — use `CUDA_VISIBLE_DEVICES=""` to force CPU
-- Short inputs (<60s) will produce only 1 clip since Claude falls back to full-length
-- The Claude API model used is `claude-sonnet-4-5-20250929` in both `select_clips.py` and `generate_copy.py`
+- Never use `color=` filter with `d=N` for dividers in `filter_complex` with video inputs — duration mismatch causes massive file bloat. Use `pad` filter instead.
+- SBS splitting: `crop=half_w:h:offset:0,scale=W:-2,crop=W:target_h` preserves aspect ratio.
+- Logo recoloring: `colorlevels=rimin=0:rimax=0.4:gimin=0:gimax=0.4:bimin=0:bimax=0.4` pushes dark purple to white.
+- Background brightness sampling: extract 1 frame with PIL, measure luminance at logo position to decide recolor.
