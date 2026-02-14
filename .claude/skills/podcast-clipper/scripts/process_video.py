@@ -33,7 +33,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,FreeSans Bold,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},2,{margin_l},{margin_r},{margin_v},1
+Style: Default,FreeSans Bold,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,{outline},{shadow},2,{margin_l},{margin_r},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -94,6 +94,30 @@ def get_video_info(video_path: str) -> dict:
     return json.loads(result.stdout)
 
 
+def is_side_by_side(video_path: str) -> bool:
+    """Detect if video is side-by-side layout (width:height ratio > 3:1)."""
+    info = get_video_info(video_path)
+    for stream in info.get("streams", []):
+        if stream.get("codec_type") == "video":
+            w = int(stream["width"])
+            h = int(stream["height"])
+            ratio = w / h
+            if ratio > 3.0:
+                log.info("  Detected side-by-side layout: %dx%d (ratio %.2f:1)", w, h, ratio)
+                return True
+            return False
+    return False
+
+
+def get_video_dimensions(video_path: str) -> tuple[int, int]:
+    """Get video width and height."""
+    info = get_video_info(video_path)
+    for stream in info.get("streams", []):
+        if stream.get("codec_type") == "video":
+            return int(stream["width"]), int(stream["height"])
+    return 0, 0
+
+
 def slice_clip(video_path: str, start: float, end: float, output_path: str) -> None:
     """Extract a clip from the source video with re-encoding for precision."""
     duration = end - start
@@ -110,14 +134,28 @@ def slice_clip(video_path: str, start: float, end: float, output_path: str) -> N
     subprocess.run(cmd, capture_output=True, check=True)
 
 
-def render_horizontal(input_path: str, output_path: str) -> None:
-    """Render 16:9 (1920x1080) — scale to fit, pad if needed."""
-    cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-vf", (
+def render_horizontal(input_path: str, output_path: str, sbs: bool = False) -> None:
+    """Render 16:9 (1920x1080).
+
+    For side-by-side source: scale the strip to fill 1920px wide, then
+    vertically center on a dark background. Each participant gets ~960x540
+    which is much larger than the generic letterbox approach.
+    """
+    if sbs:
+        # Side-by-side: scale to full width, center vertically with dark bg
+        vf = (
+            "scale=1920:-2,"
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x111111"
+        )
+    else:
+        vf = (
             "scale=1920:1080:force_original_aspect_ratio=decrease,"
             "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black"
-        ),
+        )
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", vf,
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
@@ -126,41 +164,91 @@ def render_horizontal(input_path: str, output_path: str) -> None:
     subprocess.run(cmd, capture_output=True, check=True)
 
 
-def render_square(input_path: str, output_path: str) -> None:
-    """Render 1:1 (1080x1080) — center crop."""
-    cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-vf", (
-            "scale=1920:1080:force_original_aspect_ratio=increase,"
-            "crop=1080:1080"
-        ),
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
-        output_path,
-    ]
+def render_square(input_path: str, output_path: str, sbs: bool = False) -> None:
+    """Render 1:1 (1080x1080).
+
+    For side-by-side source: split at midpoint, stack participants vertically.
+    Each participant gets ~540x540 with a small divider between them.
+    """
+    if sbs:
+        src_w, src_h = get_video_dimensions(input_path)
+        half_w = src_w // 2
+        # Split left/right participants, scale to 1080 wide (preserving 16:9),
+        # crop to 536px tall, pad first with 8px divider, vstack (536+8+536=1080)
+        filter_complex = (
+            f"[0:v]crop={half_w}:{src_h}:0:0,scale=1080:-2,crop=1080:536,"
+            f"pad=1080:544:0:0:color=0x2a2a2a[left];"
+            f"[0:v]crop={half_w}:{src_h}:{half_w}:0,scale=1080:-2,crop=1080:536[right];"
+            "[left][right]vstack=inputs=2[out]"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-filter_complex", filter_complex,
+            "-map", "[out]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", (
+                "scale=1920:1080:force_original_aspect_ratio=increase,"
+                "crop=1080:1080"
+            ),
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
     subprocess.run(cmd, capture_output=True, check=True)
 
 
-def render_vertical(input_path: str, output_path: str) -> None:
-    """Render 9:16 (1080x1920) — blurred background + centered foreground."""
-    cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-filter_complex", (
-            # Background: scale to fill 1080x1920, blur heavily
-            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,boxblur=20:5[bg];"
-            # Foreground: scale to fit width, maintain aspect ratio
-            "[0:v]scale=1080:-2[fg];"
-            # Overlay foreground centered on blurred background
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2[out]"
-        ),
-        "-map", "[out]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
-        output_path,
-    ]
+def render_vertical(input_path: str, output_path: str, sbs: bool = False) -> None:
+    """Render 9:16 (1080x1920).
+
+    For side-by-side source: split participants and stack them in the upper
+    portion of the frame. Each participant fills ~1080x607 (16:9 per person),
+    stacked in the upper 2/3. Lower third is a dark area for subtitles.
+    """
+    if sbs:
+        src_w, src_h = get_video_dimensions(input_path)
+        half_w = src_w // 2
+        # Each participant: crop half, scale to 1080 wide (preserving 16:9),
+        # crop to 600px tall. Pad first with 8px divider (600+8+600=1208).
+        # Then pad to 1080x1920 with dark bg, offset 40px from top.
+        filter_complex = (
+            f"[0:v]crop={half_w}:{src_h}:0:0,scale=1080:-2,crop=1080:600,"
+            f"pad=1080:608:0:0:color=0x2a2a2a[left];"
+            f"[0:v]crop={half_w}:{src_h}:{half_w}:0,scale=1080:-2,crop=1080:600[right];"
+            "[left][right]vstack=inputs=2,"
+            "pad=1080:1920:0:40:color=0x111111[out]"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-filter_complex", filter_complex,
+            "-map", "[out]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-filter_complex", (
+                "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+                "crop=1080:1920,boxblur=20:5[bg];"
+                "[0:v]scale=1080:-2[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2[out]"
+            ),
+            "-map", "[out]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
     subprocess.run(cmd, capture_output=True, check=True)
 
 
@@ -283,30 +371,104 @@ def burn_subtitles(video_path: str, ass_path: str, output_path: str) -> None:
     subprocess.run(cmd, capture_output=True, check=True)
 
 
+def _sample_bg_brightness(video_path: str, x1: int, y1: int, x2: int, y2: int) -> float:
+    """Sample the average brightness of a region in the first frame.
+
+    Returns mean luminance (0-255).
+    """
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-vframes", "1", "-q:v", "2", tmp_path,
+        ]
+        subprocess.run(cmd, capture_output=True, check=True)
+
+        from PIL import Image
+        import numpy as np
+        img = Image.open(tmp_path).convert("RGB")
+        pixels = np.array(img)
+        region = pixels[max(0, y1):y2, max(0, x1):x2, :]
+        luminance = 0.299 * region[:, :, 0] + 0.587 * region[:, :, 1] + 0.114 * region[:, :, 2]
+        return float(luminance.mean())
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _get_logo_position(fmt_name: str, sbs: bool = False) -> tuple[int, int, int, int]:
+    """Get logo position (x, y, width, logo_height_approx) for a format.
+
+    Logo is placed top-right of the actual video content area.
+    """
+    config = FORMAT_CONFIGS[fmt_name]
+    frame_w = config["width"]
+    logo_width = int(frame_w * 0.18)
+    logo_height = int(logo_width * 344 / 1483)  # match source aspect ratio
+    padding = 30
+
+    if sbs:
+        # SBS layouts have specific video content regions
+        if fmt_name == "horizontal":
+            # Video strip is centered: top of strip = (1080 - 540) / 2 = 270
+            video_top = 270
+        elif fmt_name == "square":
+            # Participants start at top
+            video_top = 0
+        else:
+            # Vertical: participants start 40px from top
+            video_top = 40
+    else:
+        video_top = 0
+
+    x = frame_w - logo_width - padding
+    y = video_top + padding
+
+    return x, y, logo_width, logo_height
+
+
 def overlay_logo(
     video_path: str,
     logo_path: str,
     output_path: str,
     fmt_name: str,
+    sbs: bool = False,
 ) -> None:
-    """Overlay logo on video — bottom-right, ~8% width, semi-transparent."""
-    config = FORMAT_CONFIGS[fmt_name]
-    logo_width = int(config["width"] * 0.08)
+    """Overlay logo top-right of video content, ~18% width, semi-transparent.
 
-    if fmt_name == "vertical":
-        # Position higher to avoid TikTok/Reels controls
-        y_pos = f"H-h-{config['margin_v'] + 40}"
+    Automatically detects if the logo background is dark and applies a
+    white recolor filter so the logo remains visible on any background.
+    """
+    x, y, logo_width, logo_height = _get_logo_position(fmt_name, sbs)
+    padding = 30
+
+    # Sample background brightness at logo position to decide coloring
+    bg_brightness = _sample_bg_brightness(video_path, x, y, x + logo_width, y + logo_height)
+    log.info("    Logo bg brightness for %s: %.0f (at %d,%d)", fmt_name, bg_brightness, x, y)
+
+    if bg_brightness < 80:
+        # Dark background: make logo white
+        logo_filter = (
+            f"[1:v]scale={logo_width}:-1,format=rgba,"
+            f"colorlevels=rimin=0:rimax=0.4:gimin=0:gimax=0.4:bimin=0:bimax=0.4,"
+            f"colorchannelmixer=aa=0.9[logo]"
+        )
     else:
-        y_pos = "H-h-20"
+        # Bright background: use original dark logo
+        logo_filter = (
+            f"[1:v]scale={logo_width}:-1,format=rgba,"
+            f"colorchannelmixer=aa=0.85[logo]"
+        )
 
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
         "-i", logo_path,
         "-filter_complex", (
-            f"[1:v]scale={logo_width}:-1,format=rgba,"
-            f"colorchannelmixer=aa=0.7[logo];"
-            f"[0:v][logo]overlay=W-w-20:{y_pos}[out]"
+            f"{logo_filter};"
+            f"[0:v][logo]overlay={x}:{y}[out]"
         ),
         "-map", "[out]", "-map", "0:a?",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
@@ -418,6 +580,9 @@ def process_single_clip(
     log.info("    Slicing %.1f-%.1f...", clip["start_time"], clip["end_time"])
     slice_clip(video_path, clip["start_time"], clip["end_time"], raw_slice)
 
+    # Detect side-by-side layout for specialized rendering
+    sbs = is_side_by_side(raw_slice)
+
     formats = {
         "horizontal": render_horizontal,
         "square": render_square,
@@ -429,7 +594,7 @@ def process_single_clip(
 
         # Step B: Render format
         fmt_video = os.path.join(clip_dir, f"_{fmt_name}_nosub.mp4")
-        render_fn(raw_slice, fmt_video)
+        render_fn(raw_slice, fmt_video, sbs=sbs)
 
         # Step C: Generate ASS subtitles
         if words:
@@ -447,7 +612,7 @@ def process_single_clip(
         # Step E: Overlay logo (if provided)
         final_output = os.path.join(clip_dir, f"{fmt_name}.mp4")
         if logo_path and os.path.isfile(logo_path):
-            overlay_logo(sub_video, logo_path, final_output, fmt_name)
+            overlay_logo(sub_video, logo_path, final_output, fmt_name, sbs=sbs)
         else:
             os.rename(sub_video, final_output)
 
