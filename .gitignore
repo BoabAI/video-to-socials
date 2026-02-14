@@ -1,0 +1,26 @@
+# Large video/audio files
+*.mp4
+*.wav
+*.mp3
+*.m4a
+
+# Output directory
+output/
+
+# Screenshots
+*.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# Environment
+.env
+.envrc
+
+# OS
+.DS_Store
+Thumbs.db
