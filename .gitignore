@@ -1,14 +1,32 @@
 # Large video/audio files
 *.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
 *.wav
 *.mp3
 *.m4a
+*.flac
+*.aac
+*.ogg
 
-# Output directory
+# Output directories
 output/
+full_output/
+test_*_output/
 
-# Screenshots
+# Images
 *.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+
+# Assignment file (contains secrets)
+assignemt
 
 # Python
 __pycache__/
