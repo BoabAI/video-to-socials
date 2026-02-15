@@ -12,14 +12,14 @@ The source video (`podcast_combined.mp4`) is 1280x360 — two 640x360 participan
 
 ```bash
 # Full pipeline
-python3 .claude/skills/podcast-clipper/scripts/pipeline.py <input_video> <output_dir> [--logo <logo.png>]
+python3 .claude/skills/podcast-clipper/scripts/pipeline.py <input_video> <output_dir> [--logo <logo.png>] [--num-clips 3-5] [--clip-duration 30-60]
 
 # E2E test (3 segments × 3 formats, with automated visual quality checks)
 CUDA_VISIBLE_DEVICES="" python3 test_pipeline.py
 
 # Individual pipeline steps
 python3 .claude/skills/podcast-clipper/scripts/transcribe.py <input_video> <output_dir>
-python3 .claude/skills/podcast-clipper/scripts/select_clips.py <output_dir>/transcript.json <output_dir>
+python3 .claude/skills/podcast-clipper/scripts/select_clips.py <output_dir>/transcript.json <output_dir> [--num-clips 3-5] [--clip-duration 30-60]
 python3 .claude/skills/podcast-clipper/scripts/process_video.py <input_video> <output_dir> [--logo <logo.png>]
 python3 .claude/skills/podcast-clipper/scripts/generate_copy.py <output_dir>
 ```
