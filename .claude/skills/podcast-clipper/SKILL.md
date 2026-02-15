@@ -41,9 +41,9 @@ Output: `<output_dir>/transcript.json`
 
 ### Step 2: Select Clips
 ```bash
-python3 ~/.claude/skills/podcast-clipper/scripts/select_clips.py "<output_dir>/transcript.json" "<output_dir>"
+python3 ~/.claude/skills/podcast-clipper/scripts/select_clips.py "<output_dir>/transcript.json" "<output_dir>" [--num-clips 3-5] [--clip-duration 30-60]
 ```
-Uses Claude to analyze the transcript and pick 3-5 high-value clips (30-60s each).
+Uses Claude to analyze the transcript and pick high-value clips. `--num-clips` controls how many clips to select (default: "3-5"), `--clip-duration` controls target duration in seconds (default: "30-60").
 Output: `<output_dir>/clips.json`
 
 ### Step 3: Process Video

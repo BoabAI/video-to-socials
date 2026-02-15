@@ -4,6 +4,7 @@ Step 2: Use Claude to analyze transcript and select 3-5 highlight clips.
 Produces clips.json with timestamps, titles, and rationale.
 """
 
+import argparse
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ log = logging.getLogger("select_clips")
 
 CLIP_SELECTION_PROMPT = """You are an expert podcast editor for "The ROI from AI" by SMEC AI.
 
-Analyze this transcript and identify 3-5 high-value clips for social media. Each clip should be 30-60 seconds long.
+Analyze this transcript and identify {num_clips} high-value clips for social media. Each clip should be {clip_duration} seconds long.
 
 SELECTION CRITERIA (prioritize in this order):
 1. **Hook potential** — Does it start with a surprising stat, bold claim, or compelling question?
@@ -26,7 +27,7 @@ SELECTION CRITERIA (prioritize in this order):
 5. **Emotional resonance** — Evokes curiosity, surprise, or "I need to share this"?
 
 RULES:
-- Each clip must be 30-60 seconds long
+- Each clip must be {clip_duration} seconds long
 - Prefer natural sentence boundaries for start/end points
 - Avoid clips that start or end mid-sentence
 - Ensure clips don't overlap
@@ -75,13 +76,17 @@ def format_segment_timestamps(transcript: dict) -> str:
     return "\n".join(lines)
 
 
-def select_clips(transcript: dict) -> list[dict]:
+def select_clips(transcript: dict, num_clips: str = "3-5", clip_duration: str = "30-60") -> list[dict]:
     """Use Claude to select highlight clips from transcript."""
     client = anthropic.Anthropic()
 
     segment_timestamps = format_segment_timestamps(transcript)
 
     prompt = CLIP_SELECTION_PROMPT.replace(
+        "{num_clips}", num_clips
+    ).replace(
+        "{clip_duration}", clip_duration
+    ).replace(
         "{transcript_text}", transcript["full_text"]
     ).replace(
         "{segment_timestamps}", segment_timestamps
@@ -165,12 +170,15 @@ def snap_to_word_boundaries(clips: list[dict], transcript: dict) -> list[dict]:
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        log.error("Usage: select_clips.py <transcript.json> <output_dir>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Select highlight clips from transcript")
+    parser.add_argument("transcript", help="Path to transcript.json")
+    parser.add_argument("output_dir", help="Output directory")
+    parser.add_argument("--num-clips", default="3-5", help="Number of clips to select (e.g. '3-5' or '2')")
+    parser.add_argument("--clip-duration", default="30-60", help="Clip duration in seconds (e.g. '30-60' or '45-90')")
+    args = parser.parse_args()
 
-    transcript_path = sys.argv[1]
-    output_dir = sys.argv[2]
+    transcript_path = args.transcript
+    output_dir = args.output_dir
 
     if not os.path.isfile(transcript_path):
         log.error("Error: Transcript not found: %s", transcript_path)
@@ -179,7 +187,7 @@ def main() -> None:
     transcript = load_transcript(transcript_path)
     log.info("  Loaded transcript with %d segments", len(transcript["segments"]))
 
-    clips = select_clips(transcript)
+    clips = select_clips(transcript, num_clips=args.num_clips, clip_duration=args.clip_duration)
     clips = snap_to_word_boundaries(clips, transcript)
 
     # Save clips.json

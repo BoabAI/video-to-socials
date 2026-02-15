@@ -503,32 +503,6 @@ def extract_thumbnail(video_path: str, output_path: str) -> None:
     subprocess.run(cmd, capture_output=True, check=True)
 
 
-def crop_speaker_from_sbs(image_path: str, side: str) -> str:
-    """Crop one speaker from a side-by-side frame.
-
-    Args:
-        image_path: Path to the SBS frame image.
-        side: Which speaker to extract — "left" or "right".
-
-    Returns:
-        Path to the cropped image (saved next to original with _cropped suffix).
-    """
-    from PIL import Image
-
-    img = Image.open(image_path)
-    w, h = img.size
-    mid = w // 2
-
-    if side == "left":
-        cropped = img.crop((0, 0, mid, h))
-    else:
-        cropped = img.crop((mid, 0, w, h))
-
-    cropped_path = image_path.replace(".jpg", "_cropped.jpg")
-    cropped.save(cropped_path, quality=95)
-    return cropped_path
-
-
 def enhance_thumbnail_with_gemini(
     raw_thumbnail_path: str,
     output_path: str,
