@@ -536,30 +536,37 @@ def enhance_thumbnail_with_gemini(
     guest_name: str = "",
     host_side: str = "left",
 ) -> bool:
-    """Enhance a thumbnail using Google Gemini with a style guide reference.
+    """Enhance a thumbnail via OpenRouter (Gemini image generation).
 
-    Sends the style guide template image + a single-speaker crop to Gemini
-    to produce a branded SMEC AI podcast thumbnail. The guest (opposite of
-    host_side) is featured. Returns True on success, False on
-    failure (caller should fall back to raw thumbnail).
+    Sends the style guide template image + a single-speaker crop to
+    Gemini 2.5 Flash Image Preview via OpenRouter to produce a branded
+    SMEC AI podcast thumbnail. The guest (opposite of host_side) is
+    featured. Returns True on success, False on failure.
     """
-    google_api_key = os.environ.get("GOOGLE_API_KEY", "")
-    if not google_api_key:
-        log.warning("    GOOGLE_API_KEY not set, skipping thumbnail enhancement")
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    api_key = os.environ.get("VITE_OPENROUTER_API_KEY", "")
+    if not api_key:
+        log.warning("    VITE_OPENROUTER_API_KEY not set, skipping thumbnail enhancement")
         return False
 
     try:
+        import base64
         import io
 
-        from google import genai
-        from google.genai import types
+        from openai import OpenAI
         from PIL import Image
     except ImportError as e:
         log.warning("    Missing dependency for thumbnail enhancement: %s", e)
         return False
 
     try:
-        client = genai.Client(api_key=google_api_key)
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        )
 
         # Load style guide template and raw frame
         assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -568,8 +575,6 @@ def enhance_thumbnail_with_gemini(
         if not os.path.isfile(style_guide_path):
             log.warning("    Style guide not found at %s", style_guide_path)
             return False
-
-        style_guide_img = Image.open(style_guide_path)
 
         # Crop to guest speaker (opposite side of host) if SBS frame
         raw_image = Image.open(raw_thumbnail_path)
@@ -582,6 +587,18 @@ def enhance_thumbnail_with_gemini(
             else:
                 raw_image = raw_image.crop((mid, 0, w, h))
             log.info("    Cropped to %s speaker (guest) for thumbnail", guest_side)
+
+        # Convert images to base64 data URLs
+        def img_to_data_url(img: Image.Image, fmt: str = "PNG") -> str:
+            buf = io.BytesIO()
+            img.save(buf, format=fmt)
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            mime = "image/png" if fmt == "PNG" else "image/jpeg"
+            return f"data:{mime};base64,{b64}"
+
+        style_guide_img = Image.open(style_guide_path)
+        style_url = img_to_data_url(style_guide_img)
+        raw_url = img_to_data_url(raw_image, "JPEG")
 
         if guest_name:
             guest_layout = f'- Below the headline: "WITH {guest_name.upper()}"\n'
@@ -630,25 +647,48 @@ def enhance_thumbnail_with_gemini(
             "- Do NOT add watermarks or extra logos"
         )
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-exp-image-generation",
-            contents=[prompt, style_guide_img, raw_image],
-            config=types.GenerateContentConfig(
-                response_modalities=["TEXT", "IMAGE"],
-            ),
+        response = client.chat.completions.create(
+            model="google/gemini-2.5-flash-image",
+            modalities=["image", "text"],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": style_url},
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": raw_url},
+                        },
+                    ],
+                }
+            ],
         )
 
         # Extract generated image from response
-        for part in response.candidates[0].content.parts:
-            if part.inline_data is not None:
-                enhanced = Image.open(io.BytesIO(part.inline_data.data))
+        message = response.choices[0].message
+        images = getattr(message, "images", None)
+        if images:
+            for img_obj in images:
+                # images is a list of dicts: {"type": "image_url", "image_url": {"url": "data:..."}}
+                if isinstance(img_obj, dict):
+                    data_url = img_obj["image_url"]["url"]
+                else:
+                    data_url = img_obj.image_url.url
+                # Strip "data:image/...;base64," prefix
+                _, b64_data = data_url.split(",", 1)
+                img_bytes = base64.b64decode(b64_data)
+                enhanced = Image.open(io.BytesIO(img_bytes))
                 if enhanced.size != (1920, 1080):
                     enhanced = enhanced.resize((1920, 1080), Image.LANCZOS)
                 enhanced.save(output_path, quality=95)
-                log.info("    Thumbnail enhanced with Gemini (style guide)")
+                log.info("    Thumbnail enhanced via OpenRouter (style guide)")
                 return True
 
-        log.warning("    Gemini response contained no image, keeping raw thumbnail")
+        log.warning("    OpenRouter response contained no image, keeping raw thumbnail")
         return False
 
     except Exception as e:
