@@ -687,18 +687,6 @@ def generate_thumbnail_pil(
 
         border_draw = ImageDraw.Draw(glow_layer)
         border_draw.rounded_rectangle(
-            [border_margin, border_margin, CANVAS_W - border_margin, CANVAS_H // 2],
-            radius=border_radius,
-            outline=(*BORDER_COLOR_1, 240),
-            width=3,
-        )
-        border_draw.rounded_rectangle(
-            [border_margin, CANVAS_H // 2, CANVAS_W - border_margin, CANVAS_H - border_margin],
-            radius=border_radius,
-            outline=(*BORDER_COLOR_2, 240),
-            width=3,
-        )
-        border_draw.rounded_rectangle(
             [border_margin, border_margin, CANVAS_W - border_margin, CANVAS_H - border_margin],
             radius=border_radius,
             outline=(
