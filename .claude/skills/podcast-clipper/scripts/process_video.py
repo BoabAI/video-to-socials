@@ -503,170 +503,314 @@ def extract_thumbnail(video_path: str, output_path: str) -> None:
     subprocess.run(cmd, capture_output=True, check=True)
 
 
-def enhance_thumbnail_with_gemini(
+def _generate_topic_illustration(clip_title: str, width: int, height: int) -> "Image.Image | None":
+    """Generate an AI illustration for the clip topic via Gemini.
+
+    Returns a PIL Image on success, None on failure. The illustration uses
+    a dark navy/blue palette to blend with the thumbnail background.
+    """
+    try:
+        import base64
+        import io
+
+        from dotenv import load_dotenv
+        from PIL import Image
+
+        load_dotenv()
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        if not api_key:
+            log.warning("    GOOGLE_API_KEY not set, skipping topic illustration")
+            return None
+
+        from google import genai
+
+        client = genai.Client(api_key=api_key)
+
+        prompt = (
+            "Generate an abstract decorative background illustration loosely "
+            f"inspired by the theme: \"{clip_title}\"\n\n"
+            "STYLE (mandatory):\n"
+            "- Dark navy/deep blue background (#0a0e27 to #1a1e3a palette)\n"
+            "- Abstract glowing geometric shapes: flowing lines, nodes, "
+            "circuits, waves, or particle networks\n"
+            "- Use glowing blue (#4a5aff), purple (#7b2fff), and cyan accents\n"
+            "- Ethereal, atmospheric, and decorative — NOT a literal depiction\n"
+            "- Think: abstract wallpaper art, not infographic\n\n"
+            "ABSOLUTE RULES:\n"
+            "- ZERO text anywhere. No letters. No numbers. No words. No acronyms. "
+            "No labels. No symbols resembling characters. This is non-negotiable.\n"
+            "- No human faces, hands, or bodies\n"
+            "- No screens, monitors, phones, devices, cubes, or large rectangular shapes\n"
+            "- No logos or branding\n"
+            f"- Output size: {width}x{height} pixels"
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp-image-generation",
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            ),
+        )
+
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                img_bytes = part.inline_data.data
+                illustration = Image.open(io.BytesIO(img_bytes))
+                illustration = illustration.resize((width, height), Image.LANCZOS)
+                log.info("    Topic illustration generated via Gemini")
+                return illustration
+
+        log.warning("    Gemini response contained no image")
+        return None
+
+    except Exception as e:
+        log.warning("    Topic illustration generation failed: %s", e)
+        return None
+
+
+def generate_thumbnail_pil(
     raw_thumbnail_path: str,
     output_path: str,
     clip_title: str,
     guest_name: str = "",
     host_side: str = "left",
 ) -> bool:
-    """Enhance a thumbnail via OpenRouter (Gemini image generation).
+    """Generate a branded SMEC AI thumbnail using PIL compositing.
 
-    Sends the style guide template image + a single-speaker crop to
-    Gemini 2.5 Flash Image Preview via OpenRouter to produce a branded
-    SMEC AI podcast thumbnail. The guest (opposite of host_side) is
-    featured. Returns True on success, False on failure.
+    Builds a 1920x1080 thumbnail with dark navy background, glowing border,
+    SMEC AI logo, headline text, guest name, and an AI-generated illustration
+    of the clip topic on the right side.
     """
-    from dotenv import load_dotenv
-
-    load_dotenv()
-
-    api_key = os.environ.get("VITE_OPENROUTER_API_KEY", "")
-    if not api_key:
-        log.warning("    VITE_OPENROUTER_API_KEY not set, skipping thumbnail enhancement")
-        return False
-
     try:
-        import base64
-        import io
-
-        from openai import OpenAI
-        from PIL import Image
+        from PIL import Image, ImageDraw, ImageFilter, ImageFont
     except ImportError as e:
-        log.warning("    Missing dependency for thumbnail enhancement: %s", e)
+        log.warning("    Missing PIL for thumbnail generation: %s", e)
         return False
 
     try:
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
+        CANVAS_W, CANVAS_H = 1920, 1080
+        BG_COLOR = (10, 14, 39)  # #0a0e27
+        BORDER_COLOR_1 = (74, 90, 255)  # #4a5aff
+        BORDER_COLOR_2 = (123, 47, 255)  # #7b2fff
 
-        # Load style guide template and raw frame
-        assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
-        style_guide_path = os.path.join(assets_dir, "thumbnail_style_guide.png")
+        # --- Canvas with gradient ---
+        canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
+        draw = ImageDraw.Draw(canvas)
 
-        if not os.path.isfile(style_guide_path):
-            log.warning("    Style guide not found at %s", style_guide_path)
-            return False
-
-        # Crop to guest speaker (opposite side of host) if SBS frame
-        raw_image = Image.open(raw_thumbnail_path)
-        w, h = raw_image.size
-        if w / h > 3:  # SBS detection — same ratio used elsewhere
-            guest_side = "right" if host_side == "left" else "left"
-            mid = w // 2
-            if guest_side == "left":
-                raw_image = raw_image.crop((0, 0, mid, h))
-            else:
-                raw_image = raw_image.crop((mid, 0, w, h))
-            log.info("    Cropped to %s speaker (guest) for thumbnail", guest_side)
-
-        # Convert images to base64 data URLs
-        def img_to_data_url(img: Image.Image, fmt: str = "PNG") -> str:
-            buf = io.BytesIO()
-            img.save(buf, format=fmt)
-            b64 = base64.b64encode(buf.getvalue()).decode()
-            mime = "image/png" if fmt == "PNG" else "image/jpeg"
-            return f"data:{mime};base64,{b64}"
-
-        style_guide_img = Image.open(style_guide_path)
-        style_url = img_to_data_url(style_guide_img)
-        raw_url = img_to_data_url(raw_image, "JPEG")
-
-        if guest_name:
-            guest_layout = f'- Below the headline: "WITH {guest_name.upper()}"\n'
-            guest_rule = (
-                "- Do NOT write 'GUEST NAME' — the style guide text is a "
-                f'placeholder. Write exactly "WITH {guest_name.upper()}" '
-                "as the subtitle text\n"
+        # Subtle radial vignette: darken edges
+        vignette = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+        vig_draw = ImageDraw.Draw(vignette)
+        for i in range(40):
+            alpha = int(i * 2.5)
+            margin = i * 8
+            vig_draw.rectangle(
+                [0, 0, margin, CANVAS_H], fill=(0, 0, 0, alpha)
             )
-        else:
-            guest_layout = ""
-            guest_rule = "- Do NOT include any guest name subtitle\n"
+            vig_draw.rectangle(
+                [CANVAS_W - margin, 0, CANVAS_W, CANVAS_H], fill=(0, 0, 0, alpha)
+            )
+            vig_draw.rectangle(
+                [0, 0, CANVAS_W, margin], fill=(0, 0, 0, alpha)
+            )
+            vig_draw.rectangle(
+                [0, CANVAS_H - margin, CANVAS_W, CANVAS_H], fill=(0, 0, 0, alpha)
+            )
+        canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), vignette).convert("RGB"))
 
-        prompt = (
-            "You are a professional podcast thumbnail designer for SMEC AI's "
-            '"The ROI from AI" podcast.\n\n'
-            "I'm providing two images:\n"
-            "1. A STYLE GUIDE TEMPLATE — follow this exact visual style, "
-            "layout, and branding\n"
-            "2. A RAW VIDEO FRAME — use the speaker from this as source material\n\n"
-            "Create a polished podcast thumbnail (1920x1080) matching the "
-            "style guide:\n\n"
-            "LAYOUT (match the template exactly):\n"
-            "- Dark navy/deep blue background with subtle tech/network pattern\n"
-            "- SMEC AI branding with lock icon in the TOP-LEFT corner\n"
-            "- Bold white uppercase headline text LEFT-ALIGNED on the left\n"
-            f"{guest_layout}"
-            "- The podcast speaker extracted from the raw frame, placed on "
-            "the RIGHT side (head and shoulders)\n"
-            "- Thin glowing blue/purple rounded rectangle border around the card\n"
-            "- Clean, professional, dark tech aesthetic\n\n"
-            f'HEADLINE TEXT: "{clip_title.upper()}"\n\n'
-            "CRITICAL RULES:\n"
-            "- Match the dark navy palette and tech aesthetic from the style guide\n"
-            "- SMEC AI branding must appear in the top-left\n"
-            "- Headline must be large, bold, white, uppercase, LEFT-aligned\n"
-            "- IMPORTANT: The grey silhouette in the style guide is a PLACEHOLDER. "
-            "You MUST replace it with the speaker's ACTUAL PHOTO from the raw "
-            "frame. Show their real face, real hair, real skin tones, real "
-            "clothing in FULL NATURAL COLOR. Do NOT use grey, do NOT make a "
-            "silhouette, do NOT desaturate. Crop and place the real person\n"
-            "- Include the glowing border effect\n"
-            "- Do NOT include any timestamp text like 'XX:XX' — that is a "
-            "template placeholder, not real content\n"
-            f"{guest_rule}"
-            "- Output exactly 1920x1080 pixels\n"
-            "- Do NOT add watermarks or extra logos"
+        # --- AI-generated topic illustration (right side, composited early) ---
+        illust_w = int(CANVAS_W * 0.55)
+        illust_h = CANVAS_H
+        illustration = _generate_topic_illustration(clip_title, illust_w, illust_h)
+
+        if illustration is not None:
+            import numpy as np
+
+            # Screen blend: dark pixels become invisible, bright glows show through.
+            illust_rgb = illustration.convert("RGB").resize(
+                (illust_w, illust_h), Image.LANCZOS
+            )
+            illust_arr = np.array(illust_rgb, dtype=np.float32) / 255.0
+
+            # Build fade mask for edges
+            mask_arr = np.ones((illust_h, illust_w), dtype=np.float32)
+
+            fade_left = int(illust_w * 0.45)
+            mask_arr[:, :fade_left] *= np.linspace(0, 1, fade_left)[np.newaxis, :]
+
+            fade_top = int(illust_h * 0.15)
+            mask_arr[:fade_top, :] *= np.linspace(0, 1, fade_top)[:, np.newaxis]
+
+            fade_bottom = int(illust_h * 0.15)
+            mask_arr[-fade_bottom:, :] *= np.linspace(1, 0, fade_bottom)[:, np.newaxis]
+
+            illust_arr *= mask_arr[:, :, np.newaxis]
+
+            # Subtractive blend: remove Gemini's dark bg, keep only bright elements.
+            # Subtract the median dark color (Gemini's bg), clamp to 0, then add.
+            # This perfectly eliminates any ghost rectangles from bg mismatch.
+            bg_sample = illust_arr[illust_arr.max(axis=2) < 0.15]
+            if len(bg_sample) > 0:
+                bg_color = np.median(
+                    bg_sample.reshape(-1, 3), axis=0
+                )
+            else:
+                bg_color = np.array([0.04, 0.055, 0.15])  # fallback: #0a0e27
+            residual = np.clip(illust_arr - bg_color[np.newaxis, np.newaxis, :], 0, 1)
+
+            canvas_arr = np.array(canvas, dtype=np.float32) / 255.0
+            ix = CANVAS_W - illust_w
+            canvas_arr[:, ix:, :] = np.clip(canvas_arr[:, ix:, :] + residual, 0, 1)
+            canvas = Image.fromarray(
+                (canvas_arr * 255).clip(0, 255).astype(np.uint8), mode="RGB"
+            )
+
+        # --- Glowing rounded-rect border (drawn AFTER illustration) ---
+        border_margin = 40
+        border_radius = 30
+
+        glow_layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow_layer)
+        for thickness in range(10, 0, -1):
+            alpha = int(80 + (10 - thickness) * 18)
+            r = (BORDER_COLOR_1[0] + BORDER_COLOR_2[0]) // 2
+            g = (BORDER_COLOR_1[1] + BORDER_COLOR_2[1]) // 2
+            b = (BORDER_COLOR_1[2] + BORDER_COLOR_2[2]) // 2
+            m = border_margin - thickness
+            glow_draw.rounded_rectangle(
+                [m, m, CANVAS_W - m, CANVAS_H - m],
+                radius=border_radius + thickness,
+                outline=(r, g, b, alpha),
+                width=2,
+            )
+        glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=12))
+
+        border_draw = ImageDraw.Draw(glow_layer)
+        border_draw.rounded_rectangle(
+            [border_margin, border_margin, CANVAS_W - border_margin, CANVAS_H // 2],
+            radius=border_radius,
+            outline=(*BORDER_COLOR_1, 240),
+            width=3,
         )
-
-        response = client.chat.completions.create(
-            model="google/gemini-2.5-flash-image",
-            modalities=["image", "text"],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": style_url},
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": raw_url},
-                        },
-                    ],
-                }
-            ],
+        border_draw.rounded_rectangle(
+            [border_margin, CANVAS_H // 2, CANVAS_W - border_margin, CANVAS_H - border_margin],
+            radius=border_radius,
+            outline=(*BORDER_COLOR_2, 240),
+            width=3,
         )
+        border_draw.rounded_rectangle(
+            [border_margin, border_margin, CANVAS_W - border_margin, CANVAS_H - border_margin],
+            radius=border_radius,
+            outline=(
+                (BORDER_COLOR_1[0] + BORDER_COLOR_2[0]) // 2,
+                (BORDER_COLOR_1[1] + BORDER_COLOR_2[1]) // 2,
+                (BORDER_COLOR_1[2] + BORDER_COLOR_2[2]) // 2,
+                230,
+            ),
+            width=3,
+        )
+        canvas = Image.alpha_composite(canvas.convert("RGBA"), glow_layer).convert("RGB")
 
-        # Extract generated image from response
-        message = response.choices[0].message
-        images = getattr(message, "images", None)
-        if images:
-            for img_obj in images:
-                # images is a list of dicts: {"type": "image_url", "image_url": {"url": "data:..."}}
-                if isinstance(img_obj, dict):
-                    data_url = img_obj["image_url"]["url"]
+        # --- SMEC AI logo (top-left, recolored to white) ---
+        assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
+        logo_path = os.path.join(assets_dir, "smec_logo.png")
+        if os.path.isfile(logo_path):
+            logo = Image.open(logo_path).convert("RGBA")
+            # Resize to ~200px wide, preserve aspect
+            logo_w = 400
+            logo_h = int(logo.height * logo_w / logo.width)
+            logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+
+            # Recolor to white: set all non-transparent pixels to white
+            r, g, b, a = logo.split()
+            white = Image.new("L", logo.size, 255)
+            logo = Image.merge("RGBA", (white, white, white, a))
+
+            canvas.paste(logo, (80, 60), logo)
+
+        # --- Headline text ---
+        title_text = clip_title.upper()
+        text_area_w = int(CANVAS_W * 0.50)  # left 50% of canvas
+        text_x = 80
+
+        # Auto-size font to fit
+        font_size = 72
+        font = None
+        while font_size >= 32:
+            try:
+                font = ImageFont.truetype(FONT_PATH, font_size)
+            except (IOError, OSError):
+                font = ImageFont.load_default()
+                break
+
+            # Word-wrap
+            words = title_text.split()
+            lines: list[str] = []
+            current_line = ""
+            for word in words:
+                test = f"{current_line} {word}".strip()
+                bbox = font.getbbox(test)
+                if bbox[2] - bbox[0] <= text_area_w:
+                    current_line = test
                 else:
-                    data_url = img_obj.image_url.url
-                # Strip "data:image/...;base64," prefix
-                _, b64_data = data_url.split(",", 1)
-                img_bytes = base64.b64decode(b64_data)
-                enhanced = Image.open(io.BytesIO(img_bytes))
-                if enhanced.size != (1920, 1080):
-                    enhanced = enhanced.resize((1920, 1080), Image.LANCZOS)
-                enhanced.save(output_path, quality=95)
-                log.info("    Thumbnail enhanced via OpenRouter (style guide)")
-                return True
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            if current_line:
+                lines.append(current_line)
 
-        log.warning("    OpenRouter response contained no image, keeping raw thumbnail")
-        return False
+            # Check total height fits (max 3 lines preferred)
+            line_height = int(font_size * 1.25)
+            total_h = line_height * len(lines)
+            if len(lines) <= 4 and total_h < 350:
+                break
+            font_size -= 4
+
+        # Calculate total text block height (headline + optional subtitle)
+        draw = ImageDraw.Draw(canvas)
+        if font:
+            line_height = int(font_size * 1.25)
+            block_h = line_height * len(lines)
+            if guest_name:
+                block_h += 30 + 36  # gap + subtitle font size
+            text_y_start = (CANVAS_H - block_h) // 2
+
+            for i, line in enumerate(lines):
+                y = text_y_start + i * line_height
+                # Shadow
+                draw.text((text_x + 2, y + 2), line, font=font, fill=(0, 0, 0))
+                # Main text
+                draw.text((text_x, y), line, font=font, fill=(255, 255, 255))
+
+        # --- Guest name subtitle ---
+        if guest_name:
+            subtitle_y = text_y_start + len(lines) * int(font_size * 1.25) + 30
+            try:
+                subtitle_font = ImageFont.truetype(FONT_PATH, 36)
+            except (IOError, OSError):
+                subtitle_font = ImageFont.load_default()
+            subtitle_text = f"WITH {guest_name.upper()}"
+            # Accent color for "WITH" line
+            draw.text(
+                (text_x + 2, subtitle_y + 2),
+                subtitle_text,
+                font=subtitle_font,
+                fill=(0, 0, 0),
+            )
+            draw.text(
+                (text_x, subtitle_y),
+                subtitle_text,
+                font=subtitle_font,
+                fill=(160, 170, 255),  # light blue-purple accent
+            )
+
+        # --- Save ---
+        canvas.save(output_path, "JPEG", quality=95)
+        log.info("    Thumbnail generated via PIL compositing")
+        return True
 
     except Exception as e:
-        log.warning("    Thumbnail enhancement failed: %s — keeping raw thumbnail", e)
+        log.warning("    PIL thumbnail generation failed: %s — keeping raw thumbnail", e)
         return False
 
 
@@ -809,8 +953,8 @@ def process_single_clip(
             raw_thumbnail_path,
         )
 
-    # Enhance thumbnail with Gemini (Nano Banana) if available
-    enhanced = enhance_thumbnail_with_gemini(
+    # Generate branded thumbnail via PIL compositing
+    enhanced = generate_thumbnail_pil(
         raw_thumbnail_path,
         thumbnail_path,
         clip_title=clip.get("title", ""),

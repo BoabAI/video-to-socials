@@ -15,6 +15,7 @@
 output/
 full_output/
 test_*_output/
+tmp/
 
 # Images
 *.png
