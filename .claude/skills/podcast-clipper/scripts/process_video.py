@@ -503,6 +503,82 @@ def extract_thumbnail(video_path: str, output_path: str) -> None:
     subprocess.run(cmd, capture_output=True, check=True)
 
 
+def enhance_thumbnail_with_gemini(
+    raw_thumbnail_path: str,
+    output_path: str,
+    clip_title: str,
+) -> bool:
+    """Enhance a thumbnail using Google Gemini (Nano Banana) image editing.
+
+    Sends the raw extracted frame to Gemini for cinematic color grading and
+    bold title text. Returns True on success, False on failure (keeps raw
+    thumbnail as fallback).
+    """
+    google_api_key = os.environ.get("GOOGLE_API_KEY", "")
+    if not google_api_key:
+        log.warning("    GOOGLE_API_KEY not set, skipping thumbnail enhancement")
+        return False
+
+    try:
+        from google import genai
+        from google.genai import types
+        from PIL import Image
+        import io
+    except ImportError as e:
+        log.warning("    Missing dependency for thumbnail enhancement: %s", e)
+        return False
+
+    try:
+        client = genai.Client(api_key=google_api_key)
+
+        # Load the raw thumbnail
+        raw_image = Image.open(raw_thumbnail_path)
+
+        # Pick a short hook phrase for the thumbnail text
+        hook_text = clip_title.upper()
+        if len(clip_title) > 35:
+            hook_text = clip_title[:32].upper() + "..."
+
+        prompt = (
+            f"Edit this podcast video screenshot into a professional, attention-grabbing "
+            f"YouTube thumbnail. Keep the original people and their faces clearly visible. "
+            f"Apply these enhancements:\n"
+            f"- Cinematic color grading: boost contrast, add warm tones, increase saturation\n"
+            f"- Dark vignette around edges to focus on the speakers\n"
+            f"- Semi-transparent dark gradient across the bottom 25% of the image\n"
+            f"- Bold large white text saying \"{hook_text}\" on the dark gradient bar, "
+            f"using a thick Impact-style font with strong drop shadow\n"
+            f"- Do NOT add any logos, icons, watermarks, or branding\n"
+            f"- Do NOT add extra people, objects, or AI-generated faces\n"
+            f"- Maintain 16:9 aspect ratio at 1920x1080"
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp-image-generation",
+            contents=[prompt, raw_image],
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            ),
+        )
+
+        # Extract the generated image from response
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                enhanced = Image.open(io.BytesIO(part.inline_data.data))
+                if enhanced.size != (1920, 1080):
+                    enhanced = enhanced.resize((1920, 1080), Image.LANCZOS)
+                enhanced.save(output_path, quality=95)
+                log.info("    Thumbnail enhanced with Gemini")
+                return True
+
+        log.warning("    Gemini response contained no image, keeping raw thumbnail")
+        return False
+
+    except Exception as e:
+        log.warning("    Thumbnail enhancement failed: %s — keeping raw thumbnail", e)
+        return False
+
+
 def slugify(text: str) -> str:
     """Convert text to filesystem-safe slug."""
     text = text.lower().strip()
@@ -589,12 +665,20 @@ def process_single_clip(
         "vertical": render_vertical,
     }
 
+    # Track the clean horizontal frame path (before subs/logo) for thumbnail
+    clean_horizontal_path = None
+
     for fmt_name, render_fn in formats.items():
         log.info("    Rendering %s...", fmt_name)
 
         # Step B: Render format
         fmt_video = os.path.join(clip_dir, f"_{fmt_name}_nosub.mp4")
         render_fn(raw_slice, fmt_video, sbs=sbs)
+
+        # Extract clean thumbnail frame from horizontal before subs/logo
+        if fmt_name == "horizontal":
+            clean_horizontal_path = os.path.join(clip_dir, "_clean_thumbnail.jpg")
+            extract_thumbnail(fmt_video, clean_horizontal_path)
 
         # Step C: Generate ASS subtitles
         if words:
@@ -621,13 +705,31 @@ def process_single_clip(
             if os.path.exists(tmp_file) and tmp_file != final_output:
                 os.unlink(tmp_file)
 
-    # Extract thumbnail from horizontal version
+    # Extract thumbnail — use clean frame (no subs/logo) for Gemini enhancement
     log.info("    Extracting thumbnail...")
     thumbnail_path = os.path.join(clip_dir, "thumbnail.jpg")
-    extract_thumbnail(
-        os.path.join(clip_dir, "horizontal.mp4"),
-        thumbnail_path,
+    raw_thumbnail_path = clean_horizontal_path or os.path.join(
+        clip_dir, "_raw_thumbnail.jpg"
     )
+    if not clean_horizontal_path:
+        extract_thumbnail(
+            os.path.join(clip_dir, "horizontal.mp4"),
+            raw_thumbnail_path,
+        )
+
+    # Enhance thumbnail with Gemini (Nano Banana) if available
+    enhanced = enhance_thumbnail_with_gemini(
+        raw_thumbnail_path,
+        thumbnail_path,
+        clip_title=clip.get("title", ""),
+    )
+    if not enhanced:
+        # Fall back to raw thumbnail
+        import shutil
+        shutil.copy2(raw_thumbnail_path, thumbnail_path)
+    # Clean up raw thumbnail
+    if os.path.exists(raw_thumbnail_path):
+        os.unlink(raw_thumbnail_path)
 
     # Clean up raw slice and ASS files
     for f in os.listdir(clip_dir):
