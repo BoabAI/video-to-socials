@@ -153,6 +153,15 @@ def main() -> None:
         if os.path.isfile(default_logo):
             logo_path = default_logo
 
+    host_side = "left"
+    if "--host-side" in sys.argv:
+        hs_idx = sys.argv.index("--host-side")
+        if hs_idx + 1 < len(sys.argv):
+            host_side = sys.argv[hs_idx + 1]
+            if host_side not in ("left", "right"):
+                log.error("--host-side must be 'left' or 'right', got '%s'", host_side)
+                sys.exit(1)
+
     os.makedirs(output_dir, exist_ok=True)
 
     log.info("=" * 60)
@@ -190,6 +199,7 @@ def main() -> None:
     ]
     if logo_path:
         process_cmd.extend(["--logo", logo_path])
+    process_cmd.extend(["--host-side", host_side])
     run_step("Process Video", process_cmd)
 
     # Step 4: Generate captions

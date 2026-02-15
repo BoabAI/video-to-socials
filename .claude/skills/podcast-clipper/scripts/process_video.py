@@ -503,16 +503,45 @@ def extract_thumbnail(video_path: str, output_path: str) -> None:
     subprocess.run(cmd, capture_output=True, check=True)
 
 
+def crop_speaker_from_sbs(image_path: str, side: str) -> str:
+    """Crop one speaker from a side-by-side frame.
+
+    Args:
+        image_path: Path to the SBS frame image.
+        side: Which speaker to extract — "left" or "right".
+
+    Returns:
+        Path to the cropped image (saved next to original with _cropped suffix).
+    """
+    from PIL import Image
+
+    img = Image.open(image_path)
+    w, h = img.size
+    mid = w // 2
+
+    if side == "left":
+        cropped = img.crop((0, 0, mid, h))
+    else:
+        cropped = img.crop((mid, 0, w, h))
+
+    cropped_path = image_path.replace(".jpg", "_cropped.jpg")
+    cropped.save(cropped_path, quality=95)
+    return cropped_path
+
+
 def enhance_thumbnail_with_gemini(
     raw_thumbnail_path: str,
     output_path: str,
     clip_title: str,
+    guest_name: str = "",
+    host_side: str = "left",
 ) -> bool:
-    """Enhance a thumbnail using Google Gemini (Nano Banana) image editing.
+    """Enhance a thumbnail using Google Gemini with a style guide reference.
 
-    Sends the raw extracted frame to Gemini for cinematic color grading and
-    bold title text. Returns True on success, False on failure (keeps raw
-    thumbnail as fallback).
+    Sends the style guide template image + a single-speaker crop to Gemini
+    to produce a branded SMEC AI podcast thumbnail. The guest (opposite of
+    host_side) is featured. Returns True on success, False on
+    failure (caller should fall back to raw thumbnail).
     """
     google_api_key = os.environ.get("GOOGLE_API_KEY", "")
     if not google_api_key:
@@ -520,10 +549,11 @@ def enhance_thumbnail_with_gemini(
         return False
 
     try:
+        import io
+
         from google import genai
         from google.genai import types
         from PIL import Image
-        import io
     except ImportError as e:
         log.warning("    Missing dependency for thumbnail enhancement: %s", e)
         return False
@@ -531,44 +561,91 @@ def enhance_thumbnail_with_gemini(
     try:
         client = genai.Client(api_key=google_api_key)
 
-        # Load the raw thumbnail
-        raw_image = Image.open(raw_thumbnail_path)
+        # Load style guide template and raw frame
+        assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
+        style_guide_path = os.path.join(assets_dir, "thumbnail_style_guide.png")
 
-        # Pick a short hook phrase for the thumbnail text
-        hook_text = clip_title.upper()
-        if len(clip_title) > 35:
-            hook_text = clip_title[:32].upper() + "..."
+        if not os.path.isfile(style_guide_path):
+            log.warning("    Style guide not found at %s", style_guide_path)
+            return False
+
+        style_guide_img = Image.open(style_guide_path)
+
+        # Crop to guest speaker (opposite side of host) if SBS frame
+        raw_image = Image.open(raw_thumbnail_path)
+        w, h = raw_image.size
+        if w / h > 3:  # SBS detection — same ratio used elsewhere
+            guest_side = "right" if host_side == "left" else "left"
+            mid = w // 2
+            if guest_side == "left":
+                raw_image = raw_image.crop((0, 0, mid, h))
+            else:
+                raw_image = raw_image.crop((mid, 0, w, h))
+            log.info("    Cropped to %s speaker (guest) for thumbnail", guest_side)
+
+        if guest_name:
+            guest_layout = f'- Below the headline: "WITH {guest_name.upper()}"\n'
+            guest_rule = (
+                "- Do NOT write 'GUEST NAME' — the style guide text is a "
+                f'placeholder. Write exactly "WITH {guest_name.upper()}" '
+                "as the subtitle text\n"
+            )
+        else:
+            guest_layout = ""
+            guest_rule = "- Do NOT include any guest name subtitle\n"
 
         prompt = (
-            f"Edit this podcast video screenshot into a professional, attention-grabbing "
-            f"YouTube thumbnail. Keep the original people and their faces clearly visible. "
-            f"Apply these enhancements:\n"
-            f"- Cinematic color grading: boost contrast, add warm tones, increase saturation\n"
-            f"- Dark vignette around edges to focus on the speakers\n"
-            f"- Semi-transparent dark gradient across the bottom 25% of the image\n"
-            f"- Bold large white text saying \"{hook_text}\" on the dark gradient bar, "
-            f"using a thick Impact-style font with strong drop shadow\n"
-            f"- Do NOT add any logos, icons, watermarks, or branding\n"
-            f"- Do NOT add extra people, objects, or AI-generated faces\n"
-            f"- Maintain 16:9 aspect ratio at 1920x1080"
+            "You are a professional podcast thumbnail designer for SMEC AI's "
+            '"The ROI from AI" podcast.\n\n'
+            "I'm providing two images:\n"
+            "1. A STYLE GUIDE TEMPLATE — follow this exact visual style, "
+            "layout, and branding\n"
+            "2. A RAW VIDEO FRAME — use the speaker from this as source material\n\n"
+            "Create a polished podcast thumbnail (1920x1080) matching the "
+            "style guide:\n\n"
+            "LAYOUT (match the template exactly):\n"
+            "- Dark navy/deep blue background with subtle tech/network pattern\n"
+            "- SMEC AI branding with lock icon in the TOP-LEFT corner\n"
+            "- Bold white uppercase headline text LEFT-ALIGNED on the left\n"
+            f"{guest_layout}"
+            "- The podcast speaker extracted from the raw frame, placed on "
+            "the RIGHT side (head and shoulders)\n"
+            "- Thin glowing blue/purple rounded rectangle border around the card\n"
+            "- Clean, professional, dark tech aesthetic\n\n"
+            f'HEADLINE TEXT: "{clip_title.upper()}"\n\n'
+            "CRITICAL RULES:\n"
+            "- Match the dark navy palette and tech aesthetic from the style guide\n"
+            "- SMEC AI branding must appear in the top-left\n"
+            "- Headline must be large, bold, white, uppercase, LEFT-aligned\n"
+            "- IMPORTANT: The grey silhouette in the style guide is a PLACEHOLDER. "
+            "You MUST replace it with the speaker's ACTUAL PHOTO from the raw "
+            "frame. Show their real face, real hair, real skin tones, real "
+            "clothing in FULL NATURAL COLOR. Do NOT use grey, do NOT make a "
+            "silhouette, do NOT desaturate. Crop and place the real person\n"
+            "- Include the glowing border effect\n"
+            "- Do NOT include any timestamp text like 'XX:XX' — that is a "
+            "template placeholder, not real content\n"
+            f"{guest_rule}"
+            "- Output exactly 1920x1080 pixels\n"
+            "- Do NOT add watermarks or extra logos"
         )
 
         response = client.models.generate_content(
             model="gemini-2.0-flash-exp-image-generation",
-            contents=[prompt, raw_image],
+            contents=[prompt, style_guide_img, raw_image],
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
             ),
         )
 
-        # Extract the generated image from response
+        # Extract generated image from response
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:
                 enhanced = Image.open(io.BytesIO(part.inline_data.data))
                 if enhanced.size != (1920, 1080):
                     enhanced = enhanced.resize((1920, 1080), Image.LANCZOS)
                 enhanced.save(output_path, quality=95)
-                log.info("    Thumbnail enhanced with Gemini")
+                log.info("    Thumbnail enhanced with Gemini (style guide)")
                 return True
 
         log.warning("    Gemini response contained no image, keeping raw thumbnail")
@@ -632,6 +709,7 @@ def process_single_clip(
     output_dir: str,
     logo_path: str | None,
     audio_path: str | None = None,
+    host_side: str = "left",
 ) -> str:
     """Process a single clip through the full pipeline. Returns clip directory."""
     clip_num = clip["clip_number"]
@@ -722,6 +800,8 @@ def process_single_clip(
         raw_thumbnail_path,
         thumbnail_path,
         clip_title=clip.get("title", ""),
+        guest_name=clip.get("guest_name", ""),
+        host_side=host_side,
     )
     if not enhanced:
         # Fall back to raw thumbnail
@@ -756,6 +836,15 @@ def main() -> None:
         if logo_idx + 1 < len(sys.argv):
             logo_path = sys.argv[logo_idx + 1]
 
+    host_side = "left"
+    if "--host-side" in sys.argv:
+        hs_idx = sys.argv.index("--host-side")
+        if hs_idx + 1 < len(sys.argv):
+            host_side = sys.argv[hs_idx + 1]
+            if host_side not in ("left", "right"):
+                log.error("--host-side must be 'left' or 'right', got '%s'", host_side)
+                sys.exit(1)
+
     if not os.path.isfile(video_path):
         log.error("Error: Video file not found: %s", video_path)
         sys.exit(1)
@@ -789,7 +878,7 @@ def main() -> None:
             audio_path = None
 
     for clip in clips:
-        process_single_clip(clip, video_path, output_dir, logo_path, audio_path)
+        process_single_clip(clip, video_path, output_dir, logo_path, audio_path, host_side)
 
     log.info("All %d clips processed successfully!", len(clips))
 
